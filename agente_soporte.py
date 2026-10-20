@@ -15,7 +15,7 @@ COL_SENTIMIENTO   = 5   # E
 COL_EJECUTADO     = 6   # F
 cliente_gemini = None
 # Límite de peticiones a Gemini por ejecución para no agotar la cuota diaria (20)
-MAX_ANALISIS_POR_EJECUCION = 0
+MAX_ANALISIS_POR_EJECUCION = 5
 
 def conectar_sheets():
     """
@@ -271,7 +271,6 @@ def ejecutar_agente():
 # ═══════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-
     print("🚀 Iniciando Agente de Soporte...")
 
     # ── 1. VALIDAR LA API KEY ────────────────────────────────
@@ -286,7 +285,6 @@ if __name__ == "__main__":
         print(f"❌ Error: No se encontró '{ARCHIVO_CREDENCIALES}'.")
         print("   Descárgalo en la Fase 2 (Paso 2.5) y colócalo junto al script.")
         exit(1)
-
 
     # ── 3. INICIALIZAR EL CLIENTE DE GEMINI ─────────────────
     try:
