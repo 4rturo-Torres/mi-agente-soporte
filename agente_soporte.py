@@ -281,10 +281,12 @@ if __name__ == "__main__":
         exit(1)
 
     # ── 2. VALIDAR EL ARCHIVO DE CREDENCIALES ───────────────
-    if not os.path.exists(ARCHIVO_CREDENCIALES):
+    # Solo validar si NO estamos en GitHub Actions (es decir, si no hay token en el entorno)
+    if not os.getenv("GOOGLE_TOKEN_JSON") and not os.path.exists(ARCHIVO_CREDENCIALES):
         print(f"❌ Error: No se encontró '{ARCHIVO_CREDENCIALES}'.")
         print("   Descárgalo en la Fase 2 (Paso 2.5) y colócalo junto al script.")
         exit(1)
+
 
     # ── 3. INICIALIZAR EL CLIENTE DE GEMINI ─────────────────
     try:
