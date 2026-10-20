@@ -1,9 +1,10 @@
-import json, os, time, schedule
-import gspread
+import json, os, time, schedule, gspread, sys
 from google.genai import types
 from google import genai
 from dotenv import load_dotenv
 load_dotenv()
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 
 ARCHIVO_CREDENCIALES = "client_secrets.json"
 NOMBRE_HOJA = "Respuestas de Quejas (Base de Datos)"
@@ -13,32 +14,52 @@ COL_CLASIFICACION = 4   # D
 COL_SENTIMIENTO   = 5   # E
 COL_EJECUTADO     = 6   # F
 cliente_gemini = None
+# Límite de peticiones a Gemini por ejecución para no agotar la cuota diaria (20)
+MAX_ANALISIS_POR_EJECUCION = 0
 
 def conectar_sheets():
     """
-    Autentica el script con Google usando OAuth 2.0 (gspread)
-    y devuelve la primera hoja de la base de datos.
+    Autentica el script con Google. 
+    Usa el token de GitHub Actions si existe, o abre el navegador si no.
     """
     try:
-        # 1. Autenticación con OAuth 2.0 usando el archivo client_secrets.json
-        #    gspread se encarga de abrir el navegador la primera vez
-        cliente = gspread.oauth(credentials_filename=ARCHIVO_CREDENCIALES)
+        # 1. Revisar si estamos en GitHub Actions (existe la variable)
+        token_json = os.getenv("GOOGLE_TOKEN_JSON")
+        
+        if token_json:
+            print("🔑 Autenticando usando el token de GitHub Actions...")
+            # Convertir el texto JSON a diccionario
+            info_token = json.loads(token_json)
+            
+            # Crear las credenciales usando los scopes necesarios
+            creds = Credentials.from_authorized_user_info(
+                info_token, 
+                scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+            )
+            
+            # Refrescar el token para asegurar que está vigente
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            
+            # Autorizar a gspread con estas credenciales
+            cliente = gspread.authorize(creds)
+            
+        else:
+            print("🌐 Autenticando mediante el navegador (uso local)...")
+            # Si no hay token, usar el método normal de la Práctica 1
+            cliente = gspread.oauth(credentials_filename=ARCHIVO_CREDENCIALES)
 
-        # 2. Abrir la hoja de cálculo por su nombre exacto
+        # 2. Abrir la hoja de cálculo y retornar
         libro = cliente.open(NOMBRE_HOJA)
-
-        # 3. Obtener y retornar la primera hoja (sheet1)
         hoja = libro.sheet1
         print(f"✅ Conectado exitosamente a la hoja: {NOMBRE_HOJA}")
         return hoja
 
     except FileNotFoundError:
         print(f"❌ Error: No se encontró el archivo '{ARCHIVO_CREDENCIALES}'.")
-        print("   Asegúrate de que esté en la misma carpeta que el script.")
         return None
     except gspread.exceptions.SpreadsheetNotFound:
         print(f"❌ Error: No se encontró la hoja '{NOMBRE_HOJA}'.")
-        print("   Verifica mayúsculas, tildes y espacios del nombre.")
         return None
     except Exception as e:
         print(f"❌ Error inesperado al conectar con Google Sheets: {e}")
@@ -105,7 +126,7 @@ def ejecutar_agente():
     hoja = conectar_sheets()
     if hoja is None:
         print("⚠️ No se pudo conectar con Google Sheets. Se omite este ciclo.")
-        return
+        return False
 
     # ── 2. LEER ─────────────────────────────────────────────
     try:
@@ -119,12 +140,13 @@ def ejecutar_agente():
 
     if not filas_datos:
         print("📭 No hay respuestas registradas todavía.")
-        return
+        return True
 
     print(f"📋 Filas encontradas: {len(filas_datos)}")
 
     # ── 3. FILTRAR + ANALIZAR + ESCRIBIR ────────────────────
-    nuevas_procesadas = 0
+    nuevas_procesadas = 0   
+    limite_alcanzado = False
 
     for indice, fila in enumerate(filas_datos, start=2):  # start=2 porque la fila 1 es encabezado
         # Protección por si la fila viene incompleta
@@ -146,18 +168,26 @@ def ejecutar_agente():
             print(f"⚠️ Fila {indice}: comentario vacío, se omite.")
             continue
 
-        print(f"\n🔎 Fila {indice} | Cliente: {nombre_cliente or '(sin nombre)'}")
-        print(f"   Comentario: {comentario[:70]}...")
+        # ═══════════════════════════════════════════════════════
+        # NUEVO: Verificar si ya llegamos al límite de la cuota
+        # ═══════════════════════════════════════════════════════
+        if nuevas_procesadas >= MAX_ANALISIS_POR_EJECUCION:
+            print(f"\n⚠️ Se alcanzó el límite de {MAX_ANALISIS_POR_EJECUCION} análisis por ejecución.")
+            print("   Para no agotar la cuota de la API, el resto se procesará en el próximo ciclo.")
+            limite_alcanzado = True
+            break  # Rompe el bucle 'for' y salta al resumen
 
         # ── 3.2 ANALIZAR: enviar el comentario a Gemini
                 # ── 3.2 ANALIZAR: enviar el comentario a Gemini (con reintentos)
+        print(f"\n🔎 Fila {indice} | Cliente: {nombre_cliente or '(sin nombre)'}")
+        print(f"   Comentario: {comentario[:70]}...")
+
         try:
             resultado = analizar_con_gemini(comentario)
 
         except json.JSONDecodeError as e:
             print(f"   ❌ Gemini no devolvió un JSON válido. Detalle: {e}")
             continue
-
         except Exception as e:
             error_str = str(e)
 
@@ -173,14 +203,9 @@ def ejecutar_agente():
 
             # Reintento para 429 (cuota excedida)
             elif "429" in error_str:
-                print("   ⏳ Cuota excedida. Esperando 20 s...")
-                time.sleep(20)
-                try:
-                    resultado = analizar_con_gemini(comentario)
-                except Exception as e2:
-                    print(f"   ❌ Falló el reintento: {e2}")
-                    continue
-
+                print("   ⏳ Cuota diaria agotada. Deteniendo ejecución...")
+                limite_alcanzado = True
+                break
             else:
                 print(f"   ❌ Error al analizar con Gemini: {e}")
                 continue
@@ -236,8 +261,11 @@ def ejecutar_agente():
         print("📭 No había filas nuevas por procesar.")
     else:
         print(f"✅ Ciclo terminado. Filas procesadas: {nuevas_procesadas}")
+        if limite_alcanzado:
+            print(f"   (Quedaron filas pendientes para el próximo ciclo)")
     print("-" * 55)
-    
+
+    return True
 # ═══════════════════════════════════════════════════════════
 # PUNTO DE ENTRADA DEL SCRIPT
 # ═══════════════════════════════════════════════════════════
@@ -265,6 +293,20 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"❌ Error al inicializar Gemini: {e}")
         exit(1)
+
+    # ═══════════════════════════════════════════════════════════
+    # NUEVO: MODO "UNA VEZ" PARA GITHUB ACTIONS
+    # ═══════════════════════════════════════════════════════════
+    if "--una-vez" in sys.argv:
+        print("▶️ Ejecutando en modo 'una vez' (para GitHub Actions)...")
+        exito = ejecutar_agente()
+        
+        if exito:
+            print("✅ Ejecución finalizada con éxito.")
+            exit(0) # 0 significa "Todo bien" en Linux/GitHub
+        else:
+            print("❌ La ejecución falló.")
+            exit(1) # 1 significa "Error" en Linux/GitHub
 
     # ── 4. EJECUTAR INMEDIATAMENTE (sin esperar el intervalo) ─
     print("▶️  Ejecutando primera revisión ahora...")
