@@ -1,0 +1,5 @@
+.env
+token.env
+client_secrets.json
+.git
+__pycache__/

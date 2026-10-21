@@ -2,6 +2,7 @@
 client_secrets.json
 token.json
 .env
+token.env
 
 # Archivos temporales de Python
 __pycache__/
